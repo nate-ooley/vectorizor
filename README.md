@@ -1,4 +1,13 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Dev Projects Portal
+
+A modern web application built with [Next.js](https://nextjs.org) for managing and showcasing development projects. This project serves as a portal for developers to display their work, track progress, and collaborate on various development initiatives.
+
+## Features
+
+- **Modern Tech Stack**: Built with Next.js 15, React 19, and TypeScript
+- **Responsive Design**: Optimized for all device sizes
+- **Fast Development**: Uses Turbopack for rapid development experience
+- **Type Safety**: Full TypeScript support for better development experience
 
 ## Getting Started
 

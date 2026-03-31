@@ -44,3 +44,12 @@ next-env.d.ts
 
 # OS
 Thumbs.db
+
+/src/generated/prisma
+prisma/dev.db
+prisma/dev.db-journal
+dev.db
+dev.db-journal
+
+# claude code
+.claude/

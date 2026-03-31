@@ -1,0 +1,374 @@
+{
+  "name": "Gmail Email Filter, Rank & Cleanup",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "trigger-schedule",
+      "name": "Schedule Trigger (Every 15 min)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 300],
+      "notes": "Runs every 15 minutes. Adjust interval as needed."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 50,
+        "filters": {
+          "q": "is:unread -label:ranked -label:spam-deleted"
+        },
+        "options": {
+          "format": "full"
+        }
+      },
+      "id": "gmail-fetch-unread",
+      "name": "Gmail: Fetch Unread Emails",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [220, 300],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "notes": "Fetches up to 50 unread emails not yet ranked or processed."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-not-empty",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-has-emails",
+      "name": "Filter: Has Emails?",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [440, 300],
+      "notes": "Stops processing if no emails were fetched."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// EMAIL RANKING ENGINE\n// Scores each email 1–5 and assigns a category label.\n// Modify the keyword lists and scoring rules to fit your needs.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst item = $input.item.json;\n\n// ── Extract fields ───────────────────────────────────────────────────────────\nconst subject  = (item.subject  || '').toLowerCase();\nconst from     = (item.from     || '').toLowerCase();\nconst snippet  = (item.snippet  || '').toLowerCase();\nconst labelIds = item.labelIds  || [];\nconst body     = (item.text     || item.html || '').toLowerCase();\n\nconst fullText = `${subject} ${snippet} ${body}`;\n\n// ── Scoring helpers ──────────────────────────────────────────────────────────\nlet score  = 3;          // default mid-point\nlet tags   = [];\nlet reason = [];\n\n// ── SPAM / Junk detection (score 1) ──────────────────────────────────────────\nconst spamKeywords = [\n  'unsubscribe', 'click here to unsubscribe', 'opt-out', 'opt out',\n  'free offer', 'limited time offer', 'act now', 'winner',\n  'you have been selected', 'congratulations', 'claim your prize',\n  'earn money', 'make money fast', 'work from home',\n  'nigerian prince', 'wire transfer', 'bitcoin', 'crypto bonus',\n  'guaranteed income', 'no risk', '100% free',\n  'cialis', 'viagra', 'pharmacy',\n  'dear friend', 'dear beneficiary'\n];\n\nconst spamDomains = [\n  'noreply@', 'donotreply@', 'no-reply@',\n  'marketing@', 'promo@', 'offers@', 'deals@',\n  'newsletter@', 'news@', 'updates@'\n];\n\nconst isGmailSpam = labelIds.includes('SPAM');\nconst hasSpamKeyword = spamKeywords.some(kw => fullText.includes(kw));\nconst hasSpamSender  = spamDomains.some(d => from.includes(d));\n\nif (isGmailSpam || (hasSpamKeyword && hasSpamSender)) {\n  score = 1;\n  tags.push('RANK-1-SPAM');\n  reason.push('Identified as spam');\n}\n\n// ── HIGH PRIORITY detection (score 5) ────────────────────────────────────────\nconst urgentKeywords = [\n  'urgent', 'action required', 'immediate', 'asap',\n  'deadline', 'time sensitive', 'critical', 'important',\n  'invoice', 'payment due', 'overdue', 'past due'\n];\n\nconst vipSenders = [\n  // Add VIP email addresses or domains here\n  // e.g., 'boss@company.com', '@mycompany.com'\n];\n\nconst isUrgent = urgentKeywords.some(kw => subject.includes(kw) || snippet.includes(kw));\nconst isVip    = vipSenders.some(s => from.includes(s));\nconst isStar   = labelIds.includes('STARRED');\nconst isImportant = labelIds.includes('IMPORTANT');\n\nif (score !== 1 && (isUrgent || isVip || isStar || isImportant)) {\n  score = 5;\n  tags.push('RANK-5-HIGH-PRIORITY');\n  if (isUrgent)    reason.push('Urgent keywords detected');\n  if (isVip)       reason.push('VIP sender');\n  if (isStar)      reason.push('Starred by user');\n  if (isImportant) reason.push('Marked important by Gmail');\n}\n\n// ── WORK / PROFESSIONAL (score 4) ────────────────────────────────────────────\nconst workKeywords = [\n  'meeting', 'calendar invite', 'interview', 'proposal',\n  'contract', 'project', 'report', 'review', 'feedback',\n  'pull request', 'deployment', 'release', 'bug', 'issue',\n  'github', 'jira', 'confluence', 'slack', 'figma'\n];\n\nconst isWork = workKeywords.some(kw => fullText.includes(kw));\n\nif (score === 3 && isWork) {\n  score = 4;\n  tags.push('RANK-4-WORK');\n  reason.push('Work/professional content detected');\n}\n\n// ── NEWSLETTERS / SUBSCRIPTIONS (score 2) ────────────────────────────────────\nconst newsletterKeywords = [\n  'unsubscribe', 'weekly digest', 'monthly newsletter',\n  'roundup', 'edition', 'issue #', 'vol.', 'update from',\n  'this week in', 'your daily', 'morning briefing'\n];\n\nconst isNewsletter = newsletterKeywords.some(kw => fullText.includes(kw)) || hasSpamSender;\n\nif (score === 3 && isNewsletter) {\n  score = 2;\n  tags.push('RANK-2-NEWSLETTER');\n  reason.push('Newsletter or subscription content');\n}\n\n// ── Default fallback ─────────────────────────────────────────────────────────\nif (tags.length === 0) {\n  tags.push('RANK-3-NORMAL');\n  reason.push('Normal email, no special classification');\n}\n\n// ── Output ───────────────────────────────────────────────────────────────────\nreturn {\n  ...item,\n  _rank:          score,\n  _rankTag:       tags[0],\n  _rankReason:    reason.join('; '),\n  _isSpam:        score === 1,\n  _labelToApply:  tags[0]\n};\n"
+      },
+      "id": "code-rank-emails",
+      "name": "Code: Rank & Classify Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300],
+      "notes": "Scores email 1–5. Edit keyword lists inside to customise detection rules.\n1=Spam, 2=Newsletter, 3=Normal, 4=Work, 5=High Priority"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-spam",
+              "leftValue": "={{ $json._isSpam }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "router-spam-check",
+      "name": "Router: Is Spam?",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [880, 300],
+      "notes": "Splits flow — spam emails go to deletion, others go to labelling."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "delete",
+        "messageId": "={{ $json.id }}"
+      },
+      "id": "gmail-delete-spam",
+      "name": "Gmail: Delete Spam",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1100, 180],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "notes": "Permanently deletes emails ranked as SPAM. Connect to 'true' output of the spam router."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log deletion for audit trail\nconst item = $input.item.json;\nreturn {\n  action:    'DELETED',\n  messageId: item.id,\n  subject:   item.subject,\n  from:      item.from,\n  reason:    item._rankReason,\n  timestamp: new Date().toISOString()\n};\n"
+      },
+      "id": "code-log-deletion",
+      "name": "Code: Log Deletion",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 180],
+      "notes": "Builds a structured log entry for every deleted email. Connect downstream to a Google Sheet, Notion DB, or webhook if you want an audit log."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["={{ $json._labelToApply }}"]
+      },
+      "id": "gmail-apply-rank-label",
+      "name": "Gmail: Apply Rank Label",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1100, 420],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "notes": "Applies the rank label (e.g. RANK-3-NORMAL) to the email. You must create these labels in Gmail first:\nRANK-1-SPAM, RANK-2-NEWSLETTER, RANK-3-NORMAL, RANK-4-WORK, RANK-5-HIGH-PRIORITY"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["ranked"]
+      },
+      "id": "gmail-mark-ranked",
+      "name": "Gmail: Mark as Ranked",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1320, 420],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "notes": "Adds a 'ranked' label so this email is skipped in future runs. Create a 'ranked' label in Gmail."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// EXTENSIBILITY HOOK — Add your custom post-processing logic here.\n// This node runs after every non-spam email has been ranked and labelled.\n//\n// Examples of what you might add:\n//   - Forward rank-5 emails to Slack\n//   - Save summaries to a Google Sheet\n//   - Create tasks in Todoist / Notion for rank-4 emails\n//   - Auto-reply to newsletters\n//   - Send a daily digest to yourself\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst item = $input.item.json;\n\nreturn {\n  messageId:   item.id,\n  subject:     item.subject,\n  from:        item.from,\n  rank:        item._rank,\n  rankTag:     item._rankTag,\n  rankReason:  item._rankReason,\n  processedAt: new Date().toISOString()\n};\n"
+      },
+      "id": "code-post-processing-hook",
+      "name": "Code: Post-Processing Hook",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 420],
+      "notes": "EXTENSIBILITY POINT — Wire additional nodes after this one:\n• Slack notification for Rank 5\n• Google Sheets logging\n• Todoist/Notion task creation\n• Auto-reply or forwarding"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-high-priority",
+              "leftValue": "={{ $json.rank }}",
+              "rightValue": 5,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-high-priority",
+      "name": "Filter: High Priority Only (Rank 5)",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [1760, 420],
+      "notes": "OPTIONAL — Example extension node. Only passes through Rank-5 emails.\nWire a Slack, email, or push notification node after this."
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {}
+      },
+      "id": "noop-high-priority-placeholder",
+      "name": "TODO: Notify High Priority",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1980, 420],
+      "notes": "REPLACE THIS NODE with a Slack / email / push notification action for Rank-5 emails."
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (Every 15 min)": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Fetch Unread Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: Fetch Unread Emails": {
+      "main": [
+        [
+          {
+            "node": "Filter: Has Emails?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter: Has Emails?": {
+      "main": [
+        [
+          {
+            "node": "Code: Rank & Classify Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Rank & Classify Email": {
+      "main": [
+        [
+          {
+            "node": "Router: Is Spam?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Router: Is Spam?": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Delete Spam",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail: Apply Rank Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: Delete Spam": {
+      "main": [
+        [
+          {
+            "node": "Code: Log Deletion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: Apply Rank Label": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Mark as Ranked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: Mark as Ranked": {
+      "main": [
+        [
+          {
+            "node": "Code: Post-Processing Hook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Post-Processing Hook": {
+      "main": [
+        [
+          {
+            "node": "Filter: High Priority Only (Rank 5)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter: High Priority Only (Rank 5)": {
+      "main": [
+        [
+          {
+            "node": "TODO: Notify High Priority",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["gmail", "email", "automation", "spam", "ranking"],
+  "triggerCount": 1,
+  "updatedAt": "2026-02-23T00:00:00.000Z",
+  "versionId": "1"
+}

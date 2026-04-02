@@ -16,7 +16,7 @@
     "@prisma/client": "^7.5.0",
     "@types/bcryptjs": "^2.4.6",
     "bcryptjs": "^3.0.3",
-    "next": "15.4.6",
+    "next": "^16.2.2",
     "next-auth": "^5.0.0-beta.30",
     "prisma": "^7.5.0",
     "react": "19.1.0",
